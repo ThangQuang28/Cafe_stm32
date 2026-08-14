@@ -23,12 +23,12 @@ extern "C" {
 
 /* Includes --------------------------------------------------------------------------------------*/
 #include "stm32f0xx_hal.h"
+#include "pid.h"
 /* Private macros --------------------------------------------------------------------------------*/
 /* Private data types ----------------------------------------------------------------------------*/
 /* Private variables -----------------------------------------------------------------------------*/
 /* Private function prototypes -------------------------------------------------------------------*/
 /* Public function bodies ------------------------------------------------------------------------*/
-#include "pid.h"
 /**
   * @brief  Starting point of the application.
   * @note   If a FreeRTOS API function is called before the scheduler has been started then

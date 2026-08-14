@@ -18,7 +18,7 @@
 /* Includes --------------------------------------------------------------------------------------*/
 
 /* Global configuration. */
- #include <pid_.h>
+// #include <pid_.h>
 #include "zcfg.h"
 
 /* Application. */
@@ -36,7 +36,6 @@
 #include "pump.h"
 #include "zerodet.h"
 #include "ac_det_signal.h"
-#include "pid.h"
 
 /* Private macros --------------------------------------------------------------------------------*/
 
@@ -50,15 +49,15 @@
 #define BOILER_HEATING_TIMEOUT_MS		120000U	/* Max time allowed to reach target before FAULT. */
 #define BREW_DURATION_MS				25000U	/* Pump-on duration for one shot. */
 
-/* PID gains, Q12 fixed-point (see pid.h : real_gain * 4096). Placeholder - tune on hardware,
- * start with Ki = Kd = 0 and raise Kp until the boiler oscillates gently around setpoint. */
+///* PID gains, Q12 fixed-point (see pid.h : real_gain * 4096). Placeholder - tune on hardware,
+// * start with Ki = Kd = 0 and raise Kp until the boiler oscillates gently around setpoint. */
 #define BOILER_PID_KP_Q12				(2L * 4096L)
 #define BOILER_PID_KI_Q12				(0L * 4096L)
 #define BOILER_PID_KD_Q12				(0L * 4096L)
-
-/* Heater output stage is ON/OFF only (see heater_bsp.c, plain GPIO), so it is driven here with
- * software time-proportioning control: PID output (0-100 %) sets how many ticks, out of every
- * HEATER_PWM_WINDOW_STEPS ticks, the heater stays on. window = ZAPP_TASK_DELAY * this value. */
+//
+///* Heater output stage is ON/OFF only (see heater_bsp.c, plain GPIO), so it is driven here with
+// * software time-proportioning control: PID output (0-100 %) sets how many ticks, out of every
+// * HEATER_PWM_WINDOW_STEPS ticks, the heater stays on. window = ZAPP_TASK_DELAY * this value. */
 #define HEATER_PWM_WINDOW_STEPS		4U		/* 4 * 500 ms = 2000 ms window. */
 
 /* btn.h only defines BTN_UP / BTN_DOWN - map them to app-level meaning here in one place. */
@@ -68,6 +67,14 @@
 /* Private data types ----------------------------------------------------------------------------*/
 
 PID_TypeDef PID_Controller;
+
+static const float kp = 2.0f;
+static const float ti = 20.0f;
+static const float td = 2.0f;
+static const float t  = 0.5f;
+static const float out0 = 0.0f;
+static const float out_max = 100.0f;
+static const float out_min = 0.0f;
 
 typedef struct {
 	uint8_t b_is_open;
@@ -89,8 +96,8 @@ static sys_h_t gh_sys = {0};
 static brew_state_t
 gs_brew_state = BREW_ST_IDLE;
 
-static pid_t
-gh_boiler_pid;
+//static pid_t
+//gh_boiler_pid;
 
 static uint8_t
 g_heater_window_step = 0U;
@@ -281,16 +288,16 @@ zapp_task (void* p_para)
 	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: ac_det_signal_open fail\n"), (ZERR_OK == ret),vTaskSuspend(NULL););
 
 	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open pid..\n"));
-	ret = pid_open(&gh_boiler_pid,
-				   BOILER_PID_KP_Q12,
-				   BOILER_PID_KI_Q12,
-				   BOILER_PID_KD_Q12,
-				   (int32_t)ZAPP_TASK_DELAY,
-				   0,
-				   100);
-	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: pid_open fail\n"), (ZERR_OK == ret), vTaskSuspend(NULL););
+//	ret = pid_open(&gh_boiler_pid,
+//				   BOILER_PID_KP_Q12,
+//				   BOILER_PID_KI_Q12,
+//				   BOILER_PID_KD_Q12,
+//				   (int32_t)ZAPP_TASK_DELAY,
+//				   0,
+//				   100);
+//	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: pid_open fail\n"), (ZERR_OK == ret), vTaskSuspend(NULL););
 
-	PID_Init(&PID_Controller,2.0f,20.0f,2.0f,0.2f,0.0f,100.0f,0.0f);
+	PID_Init(&PID_Controller, kp, ti, td, t, out0, out_max, out_min);
 
 	buzz_on();
 	vTaskDelay(ZAPP_TASK_DELAY / portTICK_PERIOD_MS);
@@ -298,6 +305,8 @@ zapp_task (void* p_para)
 
 	gs_brew_state = BREW_ST_IDLE;
 	g_state_enter_tick = HAL_GetTick();
+
+	float temp_setpoint = 93.0f;
 
 	for (;;)
 	{
@@ -331,7 +340,7 @@ zapp_task (void* p_para)
 
 				if (btn_pressed(START_BTN) && zapp_sensors_valid())
 				{
-					pid_reset(&gh_boiler_pid);
+//					pid_reset(&gh_boiler_pid);
 					gs_brew_state = BREW_ST_HEATING;
 					g_state_enter_tick = HAL_GetTick();
 					ZTRACE_DBG(TR_APP, ("DEBUG: zapp: IDLE -> HEATING\r\n"));
@@ -342,7 +351,9 @@ zapp_task (void* p_para)
 			case BREW_ST_HEATING:
 			{
 				pv_x10 = read_temp_boiler();
-				pid_out = pid_update(&gh_boiler_pid, BOILER_TARGET_TEMP_X10, pv_x10);
+//				pid_out = pid_update(&gh_boiler_pid, BOILER_TARGET_TEMP_X10, pv_x10);
+				
+				pid_out = (int32_t)PID_Computer(&PID_Controller, temp_setpoint, (float)pv_x10 / 10.0f);
 				zapp_heater_time_proportioning(pid_out);
 
 				if (pv_x10 >= BOILER_TARGET_TEMP_X10)
@@ -366,7 +377,9 @@ zapp_task (void* p_para)
 			{
 				/* Keep the boiler warm with the same PID loop while brewing. */
 				pv_x10 = read_temp_boiler();
-				pid_out = pid_update(&gh_boiler_pid, BOILER_TARGET_TEMP_X10, pv_x10);
+//				pid_out = pid_update(&gh_boiler_pid, BOILER_TARGET_TEMP_X10, pv_x10);
+
+				pid_out = (int32_t)PID_Computer(&PID_Controller, temp_setpoint, (float)pv_x10 / 10.0f);
 				zapp_heater_time_proportioning(pid_out);
 
 				pump_on();
@@ -412,9 +425,6 @@ zapp_task (void* p_para)
 				break;
 			}
 		}
-
-		float temp_setpoint = 93.0f;
-		PID_Computer(&PID_Controller,temp_setpoint, read_temp_boiler());
 
 		ZTRACE_DBG(TR_APP,
 				("STATE=%u BOILER_x10=%d TEMP_ERR=%u BOILER_ERR=%u HEATER=%u PUMP=%u\r\n",
