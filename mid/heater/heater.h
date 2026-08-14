@@ -76,6 +76,12 @@ heater_off(void);
 bool
 heater_is_on(void);
 
+/**
+ * @brief Safety watchdog for heater
+ */
+void
+heater_watchdog_check(void);
+
 #ifdef __cplusplus
 }
 #endif

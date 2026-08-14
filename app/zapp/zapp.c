@@ -3,6 +3,8 @@
   * @file   zapp.c
   * @brief  Starting point of this project.
   * @by     duonghd | 31-Dec-2024 | Launch for WhiteCat-FWCore.
+  * @update thangquang | 14-Aug-2026 | Add brew state machine wiring ntc + pid + heater + pump +
+  *         btn + ac_det_signal + zerodet, with FAULT handling on sensor/AC loss (see review notes).
   **************************************************************************************************
   * This file is part of WhiteCat-FWCore.
   **************************************************************************************************
@@ -16,34 +18,99 @@
 /* Includes --------------------------------------------------------------------------------------*/
 
 /* Global configuration. */
+ #include <pid_.h>
 #include "zcfg.h"
 
 /* Application. */
 #include "zapp.h"
 
+/* ST driver. */
+#include "hw.h"
+
 /* Middle. */
 #include "led.h"
 #include "buzz.h"
 #include "ntc.h"
+#include "btn.h"
+#include "heater.h"
+#include "pump.h"
+#include "zerodet.h"
+#include "ac_det_signal.h"
+#include "pid.h"
 
 /* Private macros --------------------------------------------------------------------------------*/
 
-#define ZAPP_TASK_DELAY				500
+#define ZAPP_TASK_DELAY				500U	/* ms. Also used as PID sample time (ts_ms). */
+
+/* --- Brew process parameters -------------------------------------------------------------------
+ * NOTE: placeholders - MUST be tuned on the real machine (boiler thermal mass, mains voltage,
+ * actual desired shot volume/time). Kept here, not buried inside logic, so they are easy to find.
+ * --------------------------------------------------------------------------------------------- */
+#define BOILER_TARGET_TEMP_X10			900		/* 90.0 C target boiler temperature. */
+#define BOILER_HEATING_TIMEOUT_MS		120000U	/* Max time allowed to reach target before FAULT. */
+#define BREW_DURATION_MS				25000U	/* Pump-on duration for one shot. */
+
+/* PID gains, Q12 fixed-point (see pid.h : real_gain * 4096). Placeholder - tune on hardware,
+ * start with Ki = Kd = 0 and raise Kp until the boiler oscillates gently around setpoint. */
+#define BOILER_PID_KP_Q12				(2L * 4096L)
+#define BOILER_PID_KI_Q12				(0L * 4096L)
+#define BOILER_PID_KD_Q12				(0L * 4096L)
+
+/* Heater output stage is ON/OFF only (see heater_bsp.c, plain GPIO), so it is driven here with
+ * software time-proportioning control: PID output (0-100 %) sets how many ticks, out of every
+ * HEATER_PWM_WINDOW_STEPS ticks, the heater stays on. window = ZAPP_TASK_DELAY * this value. */
+#define HEATER_PWM_WINDOW_STEPS		4U		/* 4 * 500 ms = 2000 ms window. */
+
+/* btn.h only defines BTN_UP / BTN_DOWN - map them to app-level meaning here in one place. */
+#define START_BTN						BTN_UP
+#define FAULT_RESET_BTN				BTN_DOWN
 
 /* Private data types ----------------------------------------------------------------------------*/
 
+PID_TypeDef PID_Controller;
+
 typedef struct {
 	uint8_t b_is_open;
-	
+
 } sys_h_t;
+
+typedef enum
+{
+	BREW_ST_IDLE = 0,
+	BREW_ST_HEATING,
+	BREW_ST_BREWING,
+	BREW_ST_DONE,
+	BREW_ST_FAULT
+} brew_state_t;
 
 /* Private variables -----------------------------------------------------------------------------*/
 static sys_h_t gh_sys = {0};
 
+static brew_state_t
+gs_brew_state = BREW_ST_IDLE;
+
+static pid_t
+gh_boiler_pid;
+
+static uint8_t
+g_heater_window_step = 0U;
+
+static uint32_t
+g_state_enter_tick = 0U;
+
 /* Private function prototypes -------------------------------------------------------------------*/
-		
+
 static void
 zapp_task (void* p_para);
+
+static bool
+zapp_sensors_valid (void);
+
+static void
+zapp_enter_fault (const char* p_reason);
+
+static void
+zapp_heater_time_proportioning (int32_t duty_percent);
 
 /* Public function bodies ------------------------------------------------------------------------*/
 
@@ -70,6 +137,82 @@ zapp_open (void)
 /* Private function bodies -----------------------------------------------------------------------*/
 
 /**
+  * @brief      Check whether both NTC channels currently hold valid readings and AC is present.
+  * @note       This is the single choke point every state must go through before energizing the
+  *             heater - do not duplicate this check inline elsewhere.
+  * @retval     true  if safe to drive the heater.
+  * @retval     false otherwise.
+  */
+static bool
+zapp_sensors_valid (void)
+{
+	if (ntc_error(NTC_TEMP_T) || ntc_error(NTC_BOILER_T))
+	{
+		return false;
+	}
+
+	if (ac_det_signal_ready() && !ac_det_signal_is_present())
+	{
+		return false;
+	}
+
+	return true;
+}
+
+/**
+  * @brief      Force heater/pump to a known-safe OFF state and move to FAULT.
+  * @note       FAULT never auto-recovers - see BREW_ST_FAULT below, it requires an explicit
+  *             long-press of FAULT_RESET_BTN while sensors are valid again.
+  * @param[in]  p_reason: text reason, for trace only.
+  * @retval     None.
+  */
+static void
+zapp_enter_fault (const char* p_reason)
+{
+	heater_off();
+	pump_off();
+	g_heater_window_step = 0U;
+
+	ZTRACE_ERR(TR_APP, ("ERROR: zapp: entering FAULT (%s)\r\n", p_reason), false, (void)0);
+
+	gs_brew_state = BREW_ST_FAULT;
+	g_state_enter_tick = HAL_GetTick();
+}
+
+/**
+  * @brief      Drive the ON/OFF heater output using software time-proportioning control.
+  * @param[in]  duty_percent: desired ON ratio, 0-100 (clamped internally).
+  * @retval     None.
+  */
+static void
+zapp_heater_time_proportioning (int32_t duty_percent)
+{
+	uint8_t on_steps;
+
+	if (duty_percent < 0)
+	{
+		duty_percent = 0;
+	}
+	if (duty_percent > 100)
+	{
+		duty_percent = 100;
+	}
+
+	on_steps = (uint8_t)(((uint32_t)duty_percent * HEATER_PWM_WINDOW_STEPS) / 100U);
+
+	if (g_heater_window_step < on_steps)
+	{
+		heater_on();
+	}
+	else
+	{
+		heater_off();
+	}
+
+	g_heater_window_step = (uint8_t)((g_heater_window_step + 1U) % HEATER_PWM_WINDOW_STEPS);
+}
+
+/**
   * @brief      Initialize peripherals and create tasks relating to them.
   * @param[in]  p_para: not use.
   * @retval     None.
@@ -81,6 +224,8 @@ zapp_task (void* p_para)
     UBaseType_t uxHighWaterMark;
 #endif
 	zerr_t ret = ZERR_OK;
+	int16_t pv_x10;
+	int32_t pid_out;
 /*	char sd_path[4];   		 SD logical drive path */
 
 #if defined (ZERROR) || defined (ZDEBUG)
@@ -113,47 +258,177 @@ zapp_task (void* p_para)
 #endif
 
 	buzz_open();
+
+	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open btn..\n"));
+	ret = btn_cfg();
+	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: btn_cfg fail\n"), (ZERR_OK == ret), vTaskSuspend(NULL););
+	btn_enable();
+
+	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open heater..\n"));
+	ret = heater_open();
+	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: heater_open fail\n"), (ZERR_OK == ret),vTaskSuspend(NULL););
+
+	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open pump..\n"));
+	ret = pump_open();
+	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: pump_open fail\n"), (ZERR_OK == ret), vTaskSuspend(NULL););
+
+	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open zerodet..\n"));
+	ret = zerodet_open();
+	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: zerodet_open fail\n"), (ZERR_OK == ret),vTaskSuspend(NULL););
+
+	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open ac_det_sinal..\n"));
+	ret = ac_det_signal_open();
+	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: ac_det_signal_open fail\n"), (ZERR_OK == ret),vTaskSuspend(NULL););
+
+	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open pid..\n"));
+	ret = pid_open(&gh_boiler_pid,
+				   BOILER_PID_KP_Q12,
+				   BOILER_PID_KI_Q12,
+				   BOILER_PID_KD_Q12,
+				   (int32_t)ZAPP_TASK_DELAY,
+				   0,
+				   100);
+	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: pid_open fail\n"), (ZERR_OK == ret), vTaskSuspend(NULL););
+
+	PID_Init(&PID_Controller,2.0f,20.0f,2.0f,0.2f,0.0f,100.0f,0.0f);
+
 	buzz_on();
 	vTaskDelay(ZAPP_TASK_DELAY / portTICK_PERIOD_MS);
 	buzz_off();
-	
-#if 1
+
+	gs_brew_state = BREW_ST_IDLE;
+	g_state_enter_tick = HAL_GetTick();
+
 	for (;;)
 	{
-		float temp_sensor;
-		float temp_boiler;
-		uint32_t temp_sensor_x100;
-		uint32_t temp_boiler_x100;
-		uint16_t raw_sensor;
-		uint16_t raw_boiler;
-
+		/*
+		 * --- Update inputs, every cycle, regardless of state ---
+		 */
 		ntc_update();
+		btn_update();
+		zerodet_update();
+		ac_det_signal_update();
 
-		raw_sensor = ntc_get_raw(NTC_TEMP_T);
-		raw_boiler = ntc_get_raw(NTC_BOILER_T);
-		temp_sensor = read_temp_sensor();
-		temp_boiler = read_temp_boiler();
+		/*
+		 * --- Global safety check ---
+		 * A sensor or AC-presence fault always wins over whatever state we are in, except when
+		 * we are already IDLE or FAULT (heater/pump are already forced off in both of those).
+		 */
+		if ((gs_brew_state != BREW_ST_IDLE) &&
+			(gs_brew_state != BREW_ST_FAULT) &&
+			!zapp_sensors_valid())
+		{
+			zapp_enter_fault("sensor or AC loss");
+		}
 
-		temp_sensor_x100 = (uint32_t)(temp_sensor * 100.0f);
-		temp_boiler_x100 = (uint32_t)(temp_boiler * 100.0f);
+		switch (gs_brew_state)
+		{
+			case BREW_ST_IDLE:
+			{
+				heater_off();
+				pump_off();
+				g_heater_window_step = 0U;
 
-		ZTRACE_DBG(
-		    TR_APP,
-		    ("NTC TEMP: %ld.%02ld C ERR=%u | "
-		     "NTC BOILER: %ld.%02ld C ERR=%u\r\n",
-		     temp_sensor_x100 / 100,
-		     (temp_sensor_x100 < 0 ? -temp_sensor_x100 : temp_sensor_x100) % 100,
-		     ntc_error(NTC_TEMP_T),
-		     temp_boiler_x100 / 100,
-		     (temp_boiler_x100 < 0 ? -temp_boiler_x100 : temp_boiler_x100) % 100,
-		     ntc_error(NTC_BOILER_T))
-		);
+				if (btn_pressed(START_BTN) && zapp_sensors_valid())
+				{
+					pid_reset(&gh_boiler_pid);
+					gs_brew_state = BREW_ST_HEATING;
+					g_state_enter_tick = HAL_GetTick();
+					ZTRACE_DBG(TR_APP, ("DEBUG: zapp: IDLE -> HEATING\r\n"));
+				}
+				break;
+			}
+
+			case BREW_ST_HEATING:
+			{
+				pv_x10 = read_temp_boiler();
+				pid_out = pid_update(&gh_boiler_pid, BOILER_TARGET_TEMP_X10, pv_x10);
+				zapp_heater_time_proportioning(pid_out);
+
+				if (pv_x10 >= BOILER_TARGET_TEMP_X10)
+				{
+					heater_off();
+					g_heater_window_step = 0U;
+					gs_brew_state = BREW_ST_BREWING;
+					g_state_enter_tick = HAL_GetTick();
+					ZTRACE_DBG(TR_APP, ("DEBUG: zapp: HEATING -> BREWING\r\n"));
+					break;
+				}
+
+				if ((HAL_GetTick() - g_state_enter_tick) > BOILER_HEATING_TIMEOUT_MS)
+				{
+					zapp_enter_fault("heating timeout");
+				}
+				break;
+			}
+
+			case BREW_ST_BREWING:
+			{
+				/* Keep the boiler warm with the same PID loop while brewing. */
+				pv_x10 = read_temp_boiler();
+				pid_out = pid_update(&gh_boiler_pid, BOILER_TARGET_TEMP_X10, pv_x10);
+				zapp_heater_time_proportioning(pid_out);
+
+				pump_on();
+
+				if (btn_pressed(FAULT_RESET_BTN) ||
+					((HAL_GetTick() - g_state_enter_tick) > BREW_DURATION_MS))
+				{
+					pump_off();
+					gs_brew_state = BREW_ST_DONE;
+					g_state_enter_tick = HAL_GetTick();
+					ZTRACE_DBG(TR_APP, ("DEBUG: zapp: BREWING -> DONE\r\n"));
+				}
+				break;
+			}
+
+			case BREW_ST_DONE:
+			{
+				heater_off();
+				pump_off();
+				buzz_on();
+				vTaskDelay(200U / portTICK_PERIOD_MS);
+				buzz_off();
+
+				gs_brew_state = BREW_ST_IDLE;
+				g_state_enter_tick = HAL_GetTick();
+				ZTRACE_DBG(TR_APP, ("DEBUG: zapp: DONE -> IDLE\r\n"));
+				break;
+			}
+
+			case BREW_ST_FAULT:
+			default:
+			{
+				heater_off();
+				pump_off();
+
+				/* Require an explicit long-press to leave FAULT - never auto-recover. */
+				if (btn_holding(FAULT_RESET_BTN) && zapp_sensors_valid())
+				{
+					gs_brew_state = BREW_ST_IDLE;
+					g_state_enter_tick = HAL_GetTick();
+					ZTRACE_DBG(TR_APP, ("DEBUG: zapp: FAULT -> IDLE (ack)\r\n"));
+				}
+				break;
+			}
+		}
+
+		float temp_setpoint = 93.0f;
+		PID_Computer(&PID_Controller,temp_setpoint, read_temp_boiler());
+
 		ZTRACE_DBG(TR_APP,
-				("NTC RAW: sensor=%u boiler=%u\r\n", raw_sensor, raw_boiler));
+				("STATE=%u BOILER_x10=%d TEMP_ERR=%u BOILER_ERR=%u HEATER=%u PUMP=%u\r\n",
+				 (unsigned)gs_brew_state,
+				 (int)read_temp_boiler(),
+				 ntc_error(NTC_TEMP_T),
+				 ntc_error(NTC_BOILER_T),
+				 heater_is_on(),
+				 pump_is_on()));
+
 		vTaskDelay(ZAPP_TASK_DELAY / portTICK_PERIOD_MS);
 	}
 
-#endif
-
 	vTaskDelete(NULL);
 }
+
+/* END OF FILE ----------------------------------------------------------------------------------*/

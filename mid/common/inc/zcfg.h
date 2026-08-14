@@ -31,6 +31,9 @@ extern "C" {
 #define DC_MOTOR_DRV_DRV	DRV_OPEN		/* DRV_OPEN or DRV_CLOSE */
 #define BUTTON_DRV_DRV		DRV_OPEN		/* DRV_OPEN or DRV_CLOSE */
 #define LED7_SEG_DRV_DRV	DRV_OPEN		/* DRV_OPEN or DRV_CLOSE */
+#define HEATER_DRV			DRV_OPEN		/* DRV_OPEN or DRV_CLOSE */
+#define PUMP_DRV			DRV_OPEN		/* DRV_OPEN or DRV_CLOSE */
+#define BUZZ_DRV			DRV_OPEN		/* DRV_OPEN or DRV_CLOSE */
 
 /* ---------------------------------------
     ---------- Error trace options --------

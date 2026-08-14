@@ -22,10 +22,17 @@
 /* BSP */
 #include "heater_bsp.h"
 
+/* Define ----------------------------------------------------------------------------------------*/
+
+#define HEATER_MAX_ON_MS				180000U
+
 /* Private data ----------------------------------------------------------------------------------*/
 
 static bool
 heater_state = false;
+
+static uint32_t
+heater_on_tick = 0U;
 
 /* Private function ------------------------------------------------------------------------------*/
 
@@ -40,6 +47,7 @@ heater_open(void)
 {
 	zerr_t ret;
 	heater_state = false;
+	heater_on_tick = 0U;
 	ret = heater_bsp_open();
 	if(ret != ZERR_OK)
 	{
@@ -64,6 +72,11 @@ heater_on(void)
 	{
 		return ret;
 	}
+
+	if(!heater_state)
+	{
+		heater_on_tick = HAL_GetTick();
+	}
 	heater_state = true;
 
 	return ZERR_OK;
@@ -86,6 +99,16 @@ heater_off(void)
 	}
 	heater_state = false;
 	return ZERR_OK;
+}
+
+void
+heater_watchdog_check(void)
+{
+	if(!heater_state && ((HAL_GetTick() - heater_on_tick) > HEATER_MAX_ON_MS))
+	{
+		(void)heater_bsp_off();
+		heater_state = false;
+	}
 }
 
 /**

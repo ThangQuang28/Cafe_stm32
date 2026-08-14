@@ -1,58 +1,52 @@
+#ifndef __PID_H
+#define __PID_H
+
+#include <stdint.h>
+
 /**
- *******************************************************************************
- * @auth            : thangquang
- * @day             : 19-Sep-2024
- * @file            : pump.h
- * @dissaption      : FWCore for STM32F0xx MCU designed by RDU
- *******************************************************************************
+ * @brief  Khởi tạo các thông số cho PID Controller.
+ * 
+ *         Công thức: out = (Kp * Ek) + (Kp * (t/ti) * Sum(Ek)) + (Kp * (td/t) * (Ek - Ek-1)) + out0
+ * @param pid: Pointer tới struct của PID
+ * @param Kp: Khâu tỉ lệ
+ * @param ti: Thời gian khâu tích phân
+ * @param td: Thời gian khâu vi phân
+ * @param t: Chu kỳ lấy mẫu
+ * @param out0: Giá trị output ( VD: out0 khác 0 đến khi đạt giá trị của mục tiêu)
+ * @param out_max: Giới hạn ouput cận trên (VD: 100.0 for 100% PWM)
+ * @param out_min: Giới hạn output cận dưới (VD: 0.0)
+ * @param sum_E: Tổng sai số ( thành phần tích phân )
+ * @param last_E: Sai số cuối ( thành phân vi phân )
+ * @param sum_E_max: Giới hạn tổng sai số cận trên
+ * @param sum_E_min: Giới hạn tổng sai số cận dưới
  */
+typedef struct {
+    float Kp;       
+    float ti;       
+    float td;       
+    float t;       
+    float out0;     
 
-/*  Indent using spaces
-    Tab width: 4 spaces
-    Line width: 100 characters
-    Line ending: LF (0x0A) */
+    // Limits
+    float out_max;  
+    float out_min;  
 
-/* Prevent recursive inclusion ------------------------------------------------*/
-#ifndef __PID_H_
-#define __PID_H_
+    float sum_E;   
+    float last_E;  
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+    float sum_E_max;
+    float sum_E_min;
+} PID_TypeDef;
 
-/* Public macros ---------------------------------------------------------------------------------*/
+void PID_Init(PID_TypeDef *pid, float Kp, float ti, float td, float t, float out0, float out_max, float out_min);
 
-/* Include ---------------------------------------------------------------------------------------*/
+/**
+ * @brief Tính PID dựa theo công thức trên
+ * @param pid: Pointer tới struct PID
+ * @param setpoint: Nhiệt độ mong muốn (T_0)
+ * @param measured_value: Nhiệt độ hiện tại (T_1)
+ * @retval Trả về tín hiệu output đã tính toán 
+ */
+float PID_Computer(PID_TypeDef *pid, float setpoint, float measured_value);
 
-/* C library */
-#include "stdbool.h"
-#include "stdint.h"
-/* Global */
-#include "zerr.h"
-
-/* Define ----------------------------------------------------------------------------------------*/
-
-/* Private data types ----------------------------------------------------------------------------*/
-
-/* Public data types -----------------------------------------------------------------------------*/
-typedef struct
-{
-	int32_t kp;
-	int32_t ki;
-	int32_t kd;
-	int32_t ts;
-	int32_t integral_sum;
-	int32_t last_pv;
-
-};
-
-/* Exported constants ----------------------------------------------------------------------------*/
-
-/* Private function prototypes -------------------------------------------------------------------*/
-
-/* Public function prototypes --------------------------------------------------------------------*/
-
-}
-
-
-#endif /* MID_PID_PID_H_ */
+#endif /* __PID_H */

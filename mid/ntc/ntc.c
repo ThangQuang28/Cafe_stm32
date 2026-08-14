@@ -45,10 +45,10 @@
  * T_filtered[k-1] +
  * alpha * (T[k] - T_filtered[k-1])
  */
-#define NTC_FILTER_ALPHA           	0.1f
+#define NTC_FILTER_ALPHA_Q8         0.1f
 
 
-#define NTC_TEMPERATURE_SCALE		10
+#define NTC_FILTER_SCALE_Q8			256
 
 /* Private data types ----------------------------------------------------------*/
 
@@ -107,7 +107,7 @@ ntc_lut[]=
 #define NTC_LUT_SIZE \
 	(sizeof(ntc_lut) / sizeof(ntc_lut[0]))
 
-static float
+static int16_t
 ntc_temperature[NTC_MAX_T] =
 {
     0.0f,
@@ -140,7 +140,7 @@ ntc_err_flag[NTC_MAX_T] =
 static bool
 ntc_lookup_temperature(
     uint16_t adc_value,
-    float *temp)
+    int16_t *temp)
 {
     uint32_t index;
     int32_t adc_1;
@@ -217,13 +217,9 @@ ntc_lookup_temperature(
     /*
      * Calculate interpolation deltas.
      */
-    adc_delta =
-        (int32_t)adc_value -
-        adc_1;
+    adc_delta = (int32_t)adc_value - adc_1;
 
-    temp_delta =
-        temp_2 -
-        temp_1;
+    temp_delta = temp_2 - temp_1;
 
     /*
      * Linear interpolation.
@@ -233,19 +229,12 @@ ntc_lookup_temperature(
      *     ---------------------------
      *             (ADC2 - ADC1)
      */
-    temp_x10 =
-        temp_1 +
-        (
-            (adc_delta * temp_delta) /
-            (adc_2 - adc_1)
-        );
+    temp_x10 = temp_1 + ((adc_delta * temp_delta) / (adc_2 - adc_1));
 
     /*
      * Convert temperature x10 to Celsius.
      */
-    *temp =
-        (float)temp_x10 /
-        (float)NTC_TEMPERATURE_SCALE;
+    *temp = (int16_t)temp_x10;
 
     return true;
 }
@@ -257,11 +246,13 @@ ntc_lookup_temperature(
  * @param[in]  temperature: New temperature.
  * @retval     Filtered temperature.
  */
-static float
+static int16_t
 ntc_filter_temperature(
     ntc_type_t type,
-    float temperature)
+    int16_t temperature)
 {
+	int32_t delta;
+
     if (!ntc_filter_initialized[type])
     {
         ntc_temperature_filtered[type] =
@@ -273,10 +264,12 @@ ntc_filter_temperature(
         return temperature;
     }
 
-    ntc_temperature_filtered[type] +=
-        NTC_FILTER_ALPHA *
-        (temperature -
-         ntc_temperature_filtered[type]);
+    ntc_temperature_filtered[type] =
+         (int16_t)(
+             (int32_t)ntc_temperature_filtered[type] +
+             ((NTC_FILTER_ALPHA_Q8 * delta) / NTC_FILTER_SCALE_Q8));
+
+    delta = (int32_t)temperature - (int32_t)ntc_temperature_filtered[type];
 
     return ntc_temperature_filtered[type];
 }
@@ -293,7 +286,7 @@ ntc_update_temperature(
     uint8_t channel)
 {
     uint16_t adc_value;
-    float temperature;
+    int16_t temperature;
 
     adc_value =
         ntc_bsp_get_raw(channel);
@@ -456,7 +449,7 @@ ntc_update(void)
  * @brief      Get boiler temperature.
  * @retval     Temperature in Celsius.
  */
-float
+int16_t
 read_temp_boiler(void)
 {
     return ntc_temperature[NTC_BOILER_T];
@@ -466,7 +459,7 @@ read_temp_boiler(void)
  * @brief      Get temperature sensor value.
  * @retval     Temperature in Celsius.
  */
-float
+int16_t
 read_temp_sensor(void)
 {
     return ntc_temperature[NTC_TEMP_T];
