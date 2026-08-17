@@ -20,6 +20,7 @@
 /* Global configuration. */
 // #include <pid_.h>
 #include "zcfg.h"
+#include "pid.h"
 
 /* Application. */
 #include "zapp.h"
@@ -36,6 +37,7 @@
 #include "pump.h"
 #include "zerodet.h"
 #include "ac_det_signal.h"
+#include "pid.h"
 
 /* Private macros --------------------------------------------------------------------------------*/
 
@@ -68,13 +70,13 @@
 
 PID_TypeDef PID_Controller;
 
-static const float kp = 2.0f;
-static const float ti = 20.0f;
-static const float td = 2.0f;
-static const float t  = 0.5f;
-static const float out0 = 0.0f;
-static const float out_max = 100.0f;
-static const float out_min = 0.0f;
+static const float pid_kp = 10.0f;
+static const float pid_ti = 15.0f;
+static const float pid_td = 0.5f;
+static const float pid_t  = 0.5f; 
+static const float pid_out0 = 0.0f;
+static const float pid_out_max = 100.0f;
+static const float pid_out_min = 0.0f;
 
 typedef struct {
 	uint8_t b_is_open;
@@ -295,9 +297,9 @@ zapp_task (void* p_para)
 //				   (int32_t)ZAPP_TASK_DELAY,
 //				   0,
 //				   100);
-//	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: pid_open fail\n"), (ZERR_OK == ret), vTaskSuspend(NULL););
+	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: pid_open fail\n"), (ZERR_OK == ret), vTaskSuspend(NULL););
 
-	PID_Init(&PID_Controller, kp, ti, td, t, out0, out_max, out_min);
+	PID_Init(&PID_Controller, pid_kp, pid_ti, pid_td, pid_t, pid_out0, pid_out_max, pid_out_min);
 
 	buzz_on();
 	vTaskDelay(ZAPP_TASK_DELAY / portTICK_PERIOD_MS);
@@ -306,7 +308,7 @@ zapp_task (void* p_para)
 	gs_brew_state = BREW_ST_IDLE;
 	g_state_enter_tick = HAL_GetTick();
 
-	float temp_setpoint = 93.0f;
+	float temp_setpoint = 40.0f;
 
 	for (;;)
 	{
@@ -353,8 +355,14 @@ zapp_task (void* p_para)
 				pv_x10 = read_temp_boiler();
 //				pid_out = pid_update(&gh_boiler_pid, BOILER_TARGET_TEMP_X10, pv_x10);
 				
+				/* Note: pv_x10 is temp*10, so divide by 10 to match 93.0f setpoint */
 				pid_out = (int32_t)PID_Computer(&PID_Controller, temp_setpoint, (float)pv_x10 / 10.0f);
 				zapp_heater_time_proportioning(pid_out);
+
+				ZTRACE_DBG(TR_APP, ("HEATING: Temp = %d.%d *C | SetPoint = %d *C | PID_OUT = %d %%\r\n", 
+									pv_x10 / 10, pv_x10 >= 0 ? (pv_x10 % 10) : -(pv_x10 % 10), 
+									(int)temp_setpoint, 
+									(int)pid_out));
 
 				if (pv_x10 >= BOILER_TARGET_TEMP_X10)
 				{
@@ -426,17 +434,31 @@ zapp_task (void* p_para)
 			}
 		}
 
-		ZTRACE_DBG(TR_APP,
-				("STATE=%u BOILER_x10=%d TEMP_ERR=%u BOILER_ERR=%u HEATER=%u PUMP=%u\r\n",
-				 (unsigned)gs_brew_state,
-				 (int)read_temp_boiler(),
-				 ntc_error(NTC_TEMP_T),
-				 ntc_error(NTC_BOILER_T),
-				 heater_is_on(),
-				 pump_is_on()));
+			if ( (gs_brew_state == 0) && (heater_is_on() == 0) && (pump_is_on() == 0) &&
+					(ntc_error(NTC_TEMP_T)) || (ntc_error(NTC_BOILER_T)))
+			{
+				ZTRACE_DBG(TR_APP,
+						("STATE=%u TEMP_ERR=%u BOILER_ERR=%u HEATER=%u PUMP=%u\r\n",
+						 (unsigned)gs_brew_state,
+						 ntc_error(NTC_TEMP_T),
+						 ntc_error(NTC_BOILER_T),
+						 heater_is_on(),
+						 pump_is_on()));
+			}
 
+		else {
+//			int tb = (int)read_temp_boiler();
+//			ZTRACE_DBG(TR_APP, ("Temp Boiler = %d.%d *C\r\n", tb / 10, tb >= 0 ? (tb % 10) : -(tb % 10)));
+			int ts = (int)read_temp_sensor();
+			ZTRACE_DBG(TR_APP, ("Temp Sensor = %d.%d *C\r\n", ts / 10, ts >= 0 ? (ts % 10) : -(ts % 10)));
+		}
+
+//		zapp_heater_time_proportioning(35);
+//		pump_on();
 		vTaskDelay(ZAPP_TASK_DELAY / portTICK_PERIOD_MS);
 	}
+
+
 
 	vTaskDelete(NULL);
 }

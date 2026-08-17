@@ -25,17 +25,23 @@
 /* C Library */
 #include "stdbool.h"
 #include "stdint.h"
+#include <math.h>
 
 /* Define ----------------------------------------------------------------------*/
 
 #define NTC_TEMP_DMA_CHANNEL		0U
 #define NTC_BOILER_DMA_CHANNEL		1U
 
-#define NTC_ADC_MAX_VALUE          4095U
-#define NTC_RESISTANCE             100000.0f
+#define NTC_ADC_MAX_VALUE          	4095U
+#define NTC_R_DIV                  	100000.0f
 
-#define NTC_MIN_TEMPERATURE        (-20.0f)
-#define NTC_MAX_TEMPERATURE        (150.0f)
+#define NTC_R0 						100000			// Điện trở R0 trên PCB = 100.000
+#define NTC_T0 						273.15f			// Nhiệt độ Kelvin
+#define Beta 						3950			// Hệ số Beta
+
+#define NTC_MIN_TEMPERATURE        (-200)
+#define NTC_MAX_TEMPERATURE        (1500)
+
 
 /*
  * First-order IIR filter.
@@ -45,7 +51,7 @@
  * T_filtered[k-1] +
  * alpha * (T[k] - T_filtered[k-1])
  */
-#define NTC_FILTER_ALPHA_Q8         0.1f
+#define NTC_FILTER_ALPHA_Q8         26
 
 
 #define NTC_FILTER_SCALE_Q8			256
@@ -64,48 +70,7 @@ typedef struct
 
 /* Private data ----------------------------------------------------------------*/
 
-static const ntc_lut_entry_t
-ntc_lut[]=
-{
-	    { 355U, -200},
-	    { 466U, -150},
-	    { 600U, -100},
-	    { 758U,  -50},
-	    { 939U,    0},
-	    {1140U,   50},
-	    {1357U,  100},
-	    {1585U,  150},
-	    {1817U,  200},
-	    {2048U,  250},
-	    {2270U,  300},
-	    {2481U,  350},
-	    {2676U,  400},
-	    {2854U,  450},
-	    {3014U,  500},
-	    {3155U,  550},
-	    {3280U,  600},
-	    {3388U,  650},
-	    {3482U,  700},
-	    {3563U,  750},
-	    {3633U,  800},
-	    {3694U,  850},
-	    {3745U,  900},
-	    {3790U,  950},
-	    {3828U, 1000},
-	    {3861U, 1050},
-	    {3889U, 1100},
-	    {3914U, 1150},
-	    {3935U, 1200},
-	    {3953U, 1250},
-	    {3969U, 1300},
-	    {3983U, 1350},
-	    {3995U, 1400},
-	    {4006U, 1450},
-	    {4015U, 1500}
-};
 
-#define NTC_LUT_SIZE \
-	(sizeof(ntc_lut) / sizeof(ntc_lut[0]))
 
 static int16_t
 ntc_temperature[NTC_MAX_T] =
@@ -134,6 +99,10 @@ ntc_err_flag[NTC_MAX_T] =
     true,
     true
 };
+static float NTC_A = 0.0f;
+static float NTC_B = 0.0f;
+static float NTC_C = 0.0f;
+static bool coe_calculated = false;
 
 /* Private function prototypes -------------------------------------------------*/
 
@@ -142,99 +111,67 @@ ntc_lookup_temperature(
     uint16_t adc_value,
     int16_t *temp)
 {
-    uint32_t index;
-    int32_t adc_1;
-    int32_t adc_2;
-    int32_t temp_1;
-    int32_t temp_2;
-    int32_t temp_x10;
-    int32_t adc_delta;
-    int32_t temp_delta;
-
-    if (temp == NULL)
+    if (temp == NULL || adc_value == 0 || adc_value >= NTC_ADC_MAX_VALUE)
     {
         return false;
     }
 
-    /*
-     * NOTE (fix): ntc_lut[] is now sorted with ADC ASCENDING as
-     * temperature increases (matches this board's topology: NTC on
-     * the 3V3 side, pull-down to GND - see comment above ntc_lut[]).
+    // Nhiệt độ tại 0, 25, 100
+    float NTC_T1 = NTC_T0 + 0.0f;
+    float NTC_T2 = NTC_T0 + 25.0f;		// Nhiệt độ tiêu chuẩn
+    float NTC_T3 = NTC_T0 + 100.0f;
+
+    /* 
+     * Công thức tính điện trở NTC
+     * V_ADC = VCC * R_DIV / (R_NTC + R_DIV)
+     * ADC = 4095 * R_DIV / (R_NTC + R_DIV)
+     * R_NTC = R_DIV * (4095 - ADC) / ADC
      */
+    float r_ntc = NTC_R_DIV * ((float)NTC_ADC_MAX_VALUE - (float)adc_value) / (float)adc_value;
 
     /*
-     * ADC below the lowest LUT value means temperature
-     * is below the supported LUT temperature range.
+     * Công thức tính hệ số A, B, C
+     * A = Y1 - (B + L1^2*C)*L1
+     * B = gamma2 - C*(L1^2 +L1*L2 + L2^2)
+     * C = ((gamma3 - gamma2)/(L3-L2))*(L1+L2+L3)^-1
      */
-    if (adc_value < ntc_lut[0U].adc)
-    {
-        return false;
+    if (!coe_calculated) {
+        // Tính Điện trở tại 0, 25, 100
+        float NTC_R1 = NTC_R0 * expf(Beta * ((1.0f / NTC_T1) - (1.0f / NTC_T2)));
+        float NTC_R2 = NTC_R0 * expf(Beta * ((1.0f / NTC_T2) - (1.0f / NTC_T2)));
+        float NTC_R3 = NTC_R0 * expf(Beta * ((1.0f / NTC_T3) - (1.0f / NTC_T2)));
+
+    	float L1 = logf(NTC_R1);
+    	float L2 = logf(NTC_R2);
+    	float L3 = logf(NTC_R3);
+
+    	float Y1 = 1/NTC_T1;
+    	float Y2 = 1/NTC_T2;
+    	float Y3 = 1/NTC_T3;
+
+    	float gamma2 = (Y2 - Y1)/(L2 - L1);
+    	float gamma3 = (Y3 - Y1)/(L3 - L1);
+
+    	NTC_C = ((gamma3 - gamma2)/(L3 - L2))/(L1 + L2 + L3);
+    	NTC_B = gamma2 - NTC_C*(L1*L1 + L1*L2 + L2*L2);
+    	NTC_A = Y1 - (NTC_B + L1*L1*NTC_C)*L1;
+
+    	coe_calculated = true;
     }
 
-    /*
-     * ADC above the highest LUT value means temperature
-     * is above the supported LUT temperature range.
+    /* 
+     * Phương trình Steinhart-Hart
+     * 1/T = A + B*ln(R_NTC) + C*(ln(R_NTC))^3
      */
-    if (adc_value > ntc_lut[NTC_LUT_SIZE - 1U].adc)
-    {
-        return false;
-    }
+//    float ln_r = logf(r_ntc);
+//    float temp_K = 1.0f / (ntc_sh_a + ntc_sh_b * ln_r + ntc_sh_c * ln_r * ln_r * ln_r);
 
-    /*
-     * Find the two LUT points surrounding the ADC value.
-     */
-    for (index = 0U;
-         index < (NTC_LUT_SIZE - 1U);
-         index++)
-    {
-        if ((adc_value >= ntc_lut[index].adc) &&
-            (adc_value <= ntc_lut[index + 1U].adc))
-        {
-            break;
-        }
-    }
+    float temp_K = 1.0f / (NTC_A + NTC_B * logf(r_ntc) + NTC_C * logf(r_ntc) * logf(r_ntc) * logf(r_ntc));
 
-    if (index >= (NTC_LUT_SIZE - 1U))
-    {
-        return false;
-    }
+    // Chuyển sang nhiệt độ C
+    float temp_C = temp_K - 273.15f;
 
-    /*
-     * Get LUT points.
-     */
-    adc_1 =
-        (int32_t)ntc_lut[index].adc;
-
-    adc_2 =
-        (int32_t)ntc_lut[index + 1U].adc;
-
-    temp_1 =
-        (int32_t)ntc_lut[index].temperature_x10;
-
-    temp_2 =
-        (int32_t)ntc_lut[index + 1U].temperature_x10;
-
-    /*
-     * Calculate interpolation deltas.
-     */
-    adc_delta = (int32_t)adc_value - adc_1;
-
-    temp_delta = temp_2 - temp_1;
-
-    /*
-     * Linear interpolation.
-     *
-     * T = T1 +
-     *     (ADC - ADC1) * (T2 - T1)
-     *     ---------------------------
-     *             (ADC2 - ADC1)
-     */
-    temp_x10 = temp_1 + ((adc_delta * temp_delta) / (adc_2 - adc_1));
-
-    /*
-     * Convert temperature x10 to Celsius.
-     */
-    *temp = (int16_t)temp_x10;
+    *temp = (int16_t)(temp_C * 10.0f);
 
     return true;
 }
@@ -264,12 +201,12 @@ ntc_filter_temperature(
         return temperature;
     }
 
+    delta = (int32_t)temperature - (int32_t)ntc_temperature_filtered[type];
+
     ntc_temperature_filtered[type] =
          (int16_t)(
              (int32_t)ntc_temperature_filtered[type] +
              ((NTC_FILTER_ALPHA_Q8 * delta) / NTC_FILTER_SCALE_Q8));
-
-    delta = (int32_t)temperature - (int32_t)ntc_temperature_filtered[type];
 
     return ntc_temperature_filtered[type];
 }
