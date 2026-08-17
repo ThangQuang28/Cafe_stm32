@@ -90,11 +90,11 @@ btn_read(btn_id_t id)
  * @retval     ZERR_FALSE if failed.
  */
 zerr_t
-btn_cfg(void)
+btn_open(void)
 {
     zerr_t ret;
 
-    ret = btn_bsp_cfg();
+    ret = btn_bsp_open();
 
     for (uint8_t i = 0U; i < BTN_MAX; i++)
     {

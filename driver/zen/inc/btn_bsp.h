@@ -60,7 +60,7 @@ extern "C" {
  * @retval		ZERR_FAILED if failed
  */
 zerr_t
-btn_bsp_cfg(void);
+btn_bsp_open(void);
 
 /**
  * @brief		Enabled CLK button GPIO

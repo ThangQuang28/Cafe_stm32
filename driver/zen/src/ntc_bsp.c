@@ -37,6 +37,8 @@
 
 #define NUMBER_BSP_NTC                  2U
 
+#define NTC_AVG_
+
 #define NTC_TEMP_BSP_CHANNEL            0U
 #define NTC_BOILER_BSP_CHANNEL          1U
 

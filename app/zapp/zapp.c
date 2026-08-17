@@ -257,40 +257,13 @@ zapp_task (void* p_para)
     ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: fail\n"), (ZERR_OK == ret), vTaskSuspend(NULL););
 #endif
 
+#if (DRV_OPEN == BUTTON_DRV_DRV)
+	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open button..\n"));
+    ret = btn_open();
+    ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: fail\n"), (ZERR_OK == ret), vTaskSuspend(NULL););
+#endif
 	buzz_open();
 
-	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open btn..\n"));
-	ret = btn_cfg();
-	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: btn_cfg fail\n"), (ZERR_OK == ret), vTaskSuspend(NULL););
-	btn_enable();
-
-	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open heater..\n"));
-	ret = heater_open();
-	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: heater_open fail\n"), (ZERR_OK == ret),vTaskSuspend(NULL););
-
-	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open pump..\n"));
-	ret = pump_open();
-	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: pump_open fail\n"), (ZERR_OK == ret), vTaskSuspend(NULL););
-
-	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open zerodet..\n"));
-	ret = zerodet_open();
-	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: zerodet_open fail\n"), (ZERR_OK == ret),vTaskSuspend(NULL););
-
-	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open ac_det_sinal..\n"));
-	ret = ac_det_signal_open();
-	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: ac_det_signal_open fail\n"), (ZERR_OK == ret),vTaskSuspend(NULL););
-
-	ZTRACE_DBG(TR_APP, ("DEBUG: zapp_task: open pid..\n"));
-	ret = pid_open(&gh_boiler_pid,
-				   BOILER_PID_KP_Q12,
-				   BOILER_PID_KI_Q12,
-				   BOILER_PID_KD_Q12,
-				   (int32_t)ZAPP_TASK_DELAY,
-				   0,
-				   100);
-	ZTRACE_ERR(TR_APP, ("ERROR: zapp_task: pid_open fail\n"), (ZERR_OK == ret), vTaskSuspend(NULL););
-
-	PID_Init(&PID_Controller,2.0f,20.0f,2.0f,0.2f,0.0f,100.0f,0.0f);
 
 	buzz_on();
 	vTaskDelay(ZAPP_TASK_DELAY / portTICK_PERIOD_MS);
@@ -301,129 +274,16 @@ zapp_task (void* p_para)
 
 	for (;;)
 	{
-		/*
-		 * --- Update inputs, every cycle, regardless of state ---
-		 */
-		ntc_update();
-		btn_update();
-		zerodet_update();
-		ac_det_signal_update();
+		float temp = read_temp_boiler();
 
-		/*
-		 * --- Global safety check ---
-		 * A sensor or AC-presence fault always wins over whatever state we are in, except when
-		 * we are already IDLE or FAULT (heater/pump are already forced off in both of those).
-		 */
-		if ((gs_brew_state != BREW_ST_IDLE) &&
-			(gs_brew_state != BREW_ST_FAULT) &&
-			!zapp_sensors_valid())
-		{
-			zapp_enter_fault("sensor or AC loss");
-		}
-
-		switch (gs_brew_state)
-		{
-			case BREW_ST_IDLE:
-			{
-				heater_off();
-				pump_off();
-				g_heater_window_step = 0U;
-
-				if (btn_pressed(START_BTN) && zapp_sensors_valid())
-				{
-					pid_reset(&gh_boiler_pid);
-					gs_brew_state = BREW_ST_HEATING;
-					g_state_enter_tick = HAL_GetTick();
-					ZTRACE_DBG(TR_APP, ("DEBUG: zapp: IDLE -> HEATING\r\n"));
-				}
-				break;
-			}
-
-			case BREW_ST_HEATING:
-			{
-				pv_x10 = read_temp_boiler();
-				pid_out = pid_update(&gh_boiler_pid, BOILER_TARGET_TEMP_X10, pv_x10);
-				zapp_heater_time_proportioning(pid_out);
-
-				if (pv_x10 >= BOILER_TARGET_TEMP_X10)
-				{
-					heater_off();
-					g_heater_window_step = 0U;
-					gs_brew_state = BREW_ST_BREWING;
-					g_state_enter_tick = HAL_GetTick();
-					ZTRACE_DBG(TR_APP, ("DEBUG: zapp: HEATING -> BREWING\r\n"));
-					break;
-				}
-
-				if ((HAL_GetTick() - g_state_enter_tick) > BOILER_HEATING_TIMEOUT_MS)
-				{
-					zapp_enter_fault("heating timeout");
-				}
-				break;
-			}
-
-			case BREW_ST_BREWING:
-			{
-				/* Keep the boiler warm with the same PID loop while brewing. */
-				pv_x10 = read_temp_boiler();
-				pid_out = pid_update(&gh_boiler_pid, BOILER_TARGET_TEMP_X10, pv_x10);
-				zapp_heater_time_proportioning(pid_out);
-
-				pump_on();
-
-				if (btn_pressed(FAULT_RESET_BTN) ||
-					((HAL_GetTick() - g_state_enter_tick) > BREW_DURATION_MS))
-				{
-					pump_off();
-					gs_brew_state = BREW_ST_DONE;
-					g_state_enter_tick = HAL_GetTick();
-					ZTRACE_DBG(TR_APP, ("DEBUG: zapp: BREWING -> DONE\r\n"));
-				}
-				break;
-			}
-
-			case BREW_ST_DONE:
-			{
-				heater_off();
-				pump_off();
-				buzz_on();
-				vTaskDelay(200U / portTICK_PERIOD_MS);
-				buzz_off();
-
-				gs_brew_state = BREW_ST_IDLE;
-				g_state_enter_tick = HAL_GetTick();
-				ZTRACE_DBG(TR_APP, ("DEBUG: zapp: DONE -> IDLE\r\n"));
-				break;
-			}
-
-			case BREW_ST_FAULT:
-			default:
-			{
-				heater_off();
-				pump_off();
-
-				/* Require an explicit long-press to leave FAULT - never auto-recover. */
-				if (btn_holding(FAULT_RESET_BTN) && zapp_sensors_valid())
-				{
-					gs_brew_state = BREW_ST_IDLE;
-					g_state_enter_tick = HAL_GetTick();
-					ZTRACE_DBG(TR_APP, ("DEBUG: zapp: FAULT -> IDLE (ack)\r\n"));
-				}
-				break;
-			}
-		}
-
-		float temp_setpoint = 93.0f;
-		PID_Computer(&PID_Controller,temp_setpoint, read_temp_boiler());
+		int32_t temp_int = (int32_t)temp;
+		uint32_t temp_dec = (uint32_t)((temp - (float)temp_int) * 100.0f);
 
 		ZTRACE_DBG(TR_APP,
-				("STATE=%u BOILER_x10=%d TEMP_ERR=%u BOILER_ERR=%u HEATER=%u PUMP=%u\r\n",
-				 (unsigned)gs_brew_state,
-				 (int)read_temp_boiler(),
-				 ntc_error(NTC_TEMP_T),
-				 ntc_error(NTC_BOILER_T),
-				 heater_is_on(),
-				 pump_is_on()));
+				("STATE=%u BOILER_=%d TEMP_ERR=%u BOILER_ERR=%u\r\n",
+				 (long)temp_int,
+				 (unsigned long)temp_dec));
+
 
 		vTaskDelay(ZAPP_TASK_DELAY / portTICK_PERIOD_MS);
 	}

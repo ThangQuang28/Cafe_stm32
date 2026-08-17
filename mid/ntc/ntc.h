@@ -59,14 +59,14 @@ ntc_update(void);
  * @brief      Get boiler temperature.
  * @retval     Temperature in Celsius.
  */
-int16_t
+float
 read_temp_boiler(void);
 
 /**
  * @brief      Get temperature sensor value.
  * @retval     Temperature in Celsius.
  */
-int16_t
+float
 read_temp_sensor(void);
 
 /**

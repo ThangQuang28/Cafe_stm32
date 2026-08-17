@@ -37,25 +37,14 @@
 #define NTC_MIN_TEMPERATURE        (-20.0f)
 #define NTC_MAX_TEMPERATURE        (150.0f)
 
-/*
- * First-order IIR filter.
- *
- * T_filtered[k] =
- *
- * T_filtered[k-1] +
- * alpha * (T[k] - T_filtered[k-1])
- */
-#define NTC_FILTER_ALPHA_Q8         0.1f
-
-
-#define NTC_FILTER_SCALE_Q8			256
+#define NTC_FILTER_ALPHA			(0.1f)
 
 /* Private data types ----------------------------------------------------------*/
 
 typedef struct
 {
 	uint16_t adc;
-	int16_t temperature_x10;
+	float temp;
 } ntc_lut_entry_t;
 
 /* Public data types -----------------------------------------------------------*/
@@ -67,47 +56,47 @@ typedef struct
 static const ntc_lut_entry_t
 ntc_lut[]=
 {
-	    { 355U, -200},
-	    { 466U, -150},
-	    { 600U, -100},
-	    { 758U,  -50},
-	    { 939U,    0},
-	    {1140U,   50},
-	    {1357U,  100},
-	    {1585U,  150},
-	    {1817U,  200},
-	    {2048U,  250},
-	    {2270U,  300},
-	    {2481U,  350},
-	    {2676U,  400},
-	    {2854U,  450},
-	    {3014U,  500},
-	    {3155U,  550},
-	    {3280U,  600},
-	    {3388U,  650},
-	    {3482U,  700},
-	    {3563U,  750},
-	    {3633U,  800},
-	    {3694U,  850},
-	    {3745U,  900},
-	    {3790U,  950},
-	    {3828U, 1000},
-	    {3861U, 1050},
-	    {3889U, 1100},
-	    {3914U, 1150},
-	    {3935U, 1200},
-	    {3953U, 1250},
-	    {3969U, 1300},
-	    {3983U, 1350},
-	    {3995U, 1400},
-	    {4006U, 1450},
-	    {4015U, 1500}
+		{ 355U, -20.0f },
+		{ 466U, -15.0f },
+		{ 600U, -10.0f },
+		{ 758U,  -5.0f },
+		{ 939U,   0.0f },
+		{1140U,   5.0f },
+		{1357U,  10.0f },
+		{1585U,  15.0f },
+		{1817U,  20.0f },
+		{2048U,  25.0f },
+		{2270U,  30.0f },
+		{2481U,  35.0f },
+		{2676U,  40.0f },
+		{2854U,  45.0f },
+		{3014U,  50.0f },
+		{3155U,  55.0f },
+		{3280U,  60.0f },
+		{3388U,  65.0f },
+		{3482U,  70.0f },
+		{3563U,  75.0f },
+		{3633U,  80.0f },
+		{3694U,  85.0f },
+		{3745U,  90.0f },
+		{3790U,  95.0f },
+		{3828U, 100.0f },
+		{3861U, 105.0f },
+		{3889U, 110.0f },
+		{3914U, 115.0f },
+		{3935U, 120.0f },
+		{3953U, 125.0f },
+		{3969U, 130.0f },
+		{3983U, 135.0f },
+		{3995U, 140.0f },
+		{4006U, 145.0f },
+		{4015U, 150.0f }
 };
 
 #define NTC_LUT_SIZE \
 	(sizeof(ntc_lut) / sizeof(ntc_lut[0]))
 
-static int16_t
+static float
 ntc_temperature[NTC_MAX_T] =
 {
     0.0f,
@@ -140,101 +129,61 @@ ntc_err_flag[NTC_MAX_T] =
 static bool
 ntc_lookup_temperature(
     uint16_t adc_value,
-    int16_t *temp)
+    float *temperature)
 {
     uint32_t index;
-    int32_t adc_1;
-    int32_t adc_2;
-    int32_t temp_1;
-    int32_t temp_2;
-    int32_t temp_x10;
-    int32_t adc_delta;
-    int32_t temp_delta;
+    float adc1;
+    float adc2;
+    float temp1;
+    float temp2;
 
-    if (temp == NULL)
+    if (temperature == NULL)
     {
         return false;
     }
 
-    /*
-     * NOTE (fix): ntc_lut[] is now sorted with ADC ASCENDING as
-     * temperature increases (matches this board's topology: NTC on
-     * the 3V3 side, pull-down to GND - see comment above ntc_lut[]).
-     */
-
-    /*
-     * ADC below the lowest LUT value means temperature
-     * is below the supported LUT temperature range.
-     */
     if (adc_value < ntc_lut[0U].adc)
     {
         return false;
     }
 
-    /*
-     * ADC above the highest LUT value means temperature
-     * is above the supported LUT temperature range.
-     */
     if (adc_value > ntc_lut[NTC_LUT_SIZE - 1U].adc)
     {
         return false;
     }
 
-    /*
-     * Find the two LUT points surrounding the ADC value.
-     */
     for (index = 0U;
-         index < (NTC_LUT_SIZE - 1U);
+         index < NTC_LUT_SIZE - 1U;
          index++)
     {
-        if ((adc_value >= ntc_lut[index].adc) &&
-            (adc_value <= ntc_lut[index + 1U].adc))
+        if (adc_value <= ntc_lut[index + 1U].adc)
         {
             break;
         }
     }
 
-    if (index >= (NTC_LUT_SIZE - 1U))
+    if (index >= NTC_LUT_SIZE - 1U)
     {
         return false;
     }
 
-    /*
-     * Get LUT points.
-     */
-    adc_1 =
-        (int32_t)ntc_lut[index].adc;
+    adc1 =
+        (float)ntc_lut[index].adc;
 
-    adc_2 =
-        (int32_t)ntc_lut[index + 1U].adc;
+    adc2 =
+        (float)ntc_lut[index + 1U].adc;
 
-    temp_1 =
-        (int32_t)ntc_lut[index].temperature_x10;
+    temp1 =
+        ntc_lut[index].temp;
 
-    temp_2 =
-        (int32_t)ntc_lut[index + 1U].temperature_x10;
+    temp2 =
+        ntc_lut[index + 1U].temp;
 
-    /*
-     * Calculate interpolation deltas.
-     */
-    adc_delta = (int32_t)adc_value - adc_1;
-
-    temp_delta = temp_2 - temp_1;
-
-    /*
-     * Linear interpolation.
-     *
-     * T = T1 +
-     *     (ADC - ADC1) * (T2 - T1)
-     *     ---------------------------
-     *             (ADC2 - ADC1)
-     */
-    temp_x10 = temp_1 + ((adc_delta * temp_delta) / (adc_2 - adc_1));
-
-    /*
-     * Convert temperature x10 to Celsius.
-     */
-    *temp = (int16_t)temp_x10;
+    *temperature =
+        temp1 +
+        (((float)adc_value - adc1) *
+         (temp2 - temp1) /
+         (adc2 - adc1));
 
     return true;
 }
@@ -246,12 +195,12 @@ ntc_lookup_temperature(
  * @param[in]  temperature: New temperature.
  * @retval     Filtered temperature.
  */
-static int16_t
+static float
 ntc_filter_temperature(
     ntc_type_t type,
-    int16_t temperature)
+    float temperature)
 {
-	int32_t delta;
+	float delta;
 
     if (!ntc_filter_initialized[type])
     {
@@ -264,12 +213,9 @@ ntc_filter_temperature(
         return temperature;
     }
 
-    ntc_temperature_filtered[type] =
-         (int16_t)(
-             (int32_t)ntc_temperature_filtered[type] +
-             ((NTC_FILTER_ALPHA_Q8 * delta) / NTC_FILTER_SCALE_Q8));
+    delta = temperature - ntc_temperature_filtered[type];
 
-    delta = (int32_t)temperature - (int32_t)ntc_temperature_filtered[type];
+    ntc_temperature_filtered[type] += NTC_FILTER_ALPHA * delta;
 
     return ntc_temperature_filtered[type];
 }
@@ -286,7 +232,7 @@ ntc_update_temperature(
     uint8_t channel)
 {
     uint16_t adc_value;
-    int16_t temperature;
+    float temperature;
 
     adc_value =
         ntc_bsp_get_raw(channel);
@@ -449,7 +395,7 @@ ntc_update(void)
  * @brief      Get boiler temperature.
  * @retval     Temperature in Celsius.
  */
-int16_t
+float
 read_temp_boiler(void)
 {
     return ntc_temperature[NTC_BOILER_T];
@@ -459,7 +405,7 @@ read_temp_boiler(void)
  * @brief      Get temperature sensor value.
  * @retval     Temperature in Celsius.
  */
-int16_t
+float
 read_temp_sensor(void)
 {
     return ntc_temperature[NTC_TEMP_T];

@@ -30,7 +30,7 @@
  * @retval     ZERR_FALSE    Configuration failed.
  */
 zerr_t
-btn_bsp_cfg(void)
+btn_bsp_open(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 

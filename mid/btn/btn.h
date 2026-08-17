@@ -53,7 +53,7 @@ typedef enum
  * @retval		ZERR_FALSE if failed
  */
 zerr_t
-btn_cfg(void);
+btn_open(void);
 
 /**
  * @brief		Enable BLK button
