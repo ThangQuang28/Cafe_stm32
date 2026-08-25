@@ -29,6 +29,7 @@
 /* BSP. */
 #include "zlog_bsp.h"
 #include "ntc_bsp.h"
+#include "btn_bsp.h"
 /* USER CODE END TD */
 
 /* Private define ------------------------------------------------------------*/
@@ -133,4 +134,11 @@ void
 DMA1_Channel1_IRQHandler(void)
 {
 	ntc_bsp_dma_isr();
+}
+
+void
+EXTI4_15_IRQHandler(void)
+{
+	HAL_GPIO_EXTI_IRQHandler(BTN_UP_Pin);
+	HAL_GPIO_EXTI_IRQHandler(BTN_DOWN_Pin);
 }

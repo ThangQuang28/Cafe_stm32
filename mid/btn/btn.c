@@ -1,216 +1,413 @@
- /**
+/**
  *******************************************************************************
- * @auth            : manhtd
+ * @auth            : thangquang
  * @day             : 19-Sep-2024
  * @file            : btn.c
- * @dissaption       : FWCore for STM32F0xx MCU designed by RDU
+ * @description     : Button middleware for STM32F0xx MCU
  *******************************************************************************
  */
 
-/*  Indent using spaces
-    Tab width: 4 spaces
-    Line width: 100 characters
-    Line ending: LF (0x0A) */
+/* Include -------------------------------------------------------------------*/
 
-/* Public macros ---------------------------------------------------------------------------------*/
-
-/* Include ---------------------------------------------------------------------------------------*/
-
-/* Middleware */
 #include "btn.h"
+#include "btn_bsp.h"
 #include "zerr.h"
 
-/* BSP */
-#include "btn_bsp.h"
-
-/* C Library */
 #include "stdbool.h"
+#include "stdint.h"
 
-/* Define ----------------------------------------------------------------------------------------*/
+/* Define --------------------------------------------------------------------*/
 
-#define BTN_DEBOUNCE_TIME_MS        30U
-#define BTN_HOLDING_TIME_MS         1000U
+/*
+ * Mechanical button debounce time.
+ *
+ * 10 ms gives faster response than the previous 30 ms,
+ * while still providing basic switch bounce protection.
+ */
+#define BTN_DEBOUNCE_TIME_MS       5U
 
-/* Private data types ----------------------------------------------------------------------------*/
+/*
+ * HOLD event time.
+ */
+#define BTN_HOLDING_TIME_MS        1000U
 
+/* Private data types --------------------------------------------------------*/
+
+/**
+ * @brief Button internal object.
+ */
 typedef struct
 {
-    bool current_state;
-    bool last_state;
+    /*
+     * Raw GPIO logical state.
+     *
+     * true  -> pressed
+     * false -> released
+     */
+    volatile bool raw_state;
 
-    bool pressed_event;
-    bool released_event;
+    /*
+     * Debounced stable state.
+     */
+    bool stable_state;
 
-    bool holding_event;
+    /*
+     * Debounce control.
+     */
+    volatile bool debounce_pending;
+    volatile uint32_t debounce_tick;
 
-    uint32_t debounce_tick;
+    /*
+     * Press timing.
+     */
     uint32_t press_tick;
+
+    /*
+     * HOLD event has already been generated.
+     */
+    bool hold_reported;
+
+    /*
+     * One-shot events.
+     */
+    volatile bool pressed_event;
+    volatile bool released_event;
+    volatile bool holding_event;
 
 } btn_object_t;
 
-/* Public data types -----------------------------------------------------------------------------*/
-
-/* Exported constants ----------------------------------------------------------------------------*/
-
-/* Private data ----------------------------------------------------------------*/
+/* Private data --------------------------------------------------------------*/
 
 static btn_object_t btn_object[BTN_MAX];
 
-/* Private function prototypes -------------------------------------------------------------------*/
+/* Private functions ---------------------------------------------------------*/
 
 /**
- * @brief      Read button state.
- * @param[in]  id: button ID.
- * @retval     true if pressed.
+ * @brief      Read logical button state.
+ *
+ * Hardware:
+ *
+ *     GPIO HIGH -> released
+ *     GPIO LOW  -> pressed
+ *
+ * @param[in]  id Button ID.
+ *
+ * @retval     true  if pressed.
  * @retval     false if released.
  */
-static bool
-btn_read(btn_id_t id)
+static bool btn_read(btn_id_t id)
 {
     if (id >= BTN_MAX)
     {
         return false;
     }
 
-    /*
-     * Button is active-low.
-     *
-     * GPIO_PIN_RESET -> pressed
-     * GPIO_PIN_SET   -> released
-     */
     return (
-        btn_bsp_read((uint8_t)id) == GPIO_PIN_RESET);
+        btn_bsp_read((uint8_t)id) == GPIO_PIN_RESET
+    );
 }
 
-/* Public function prototypes --------------------------------------------------------------------*/
-
 /**
- * @brief      Cfg button.
- * @retval     ZERR_OK if successful.
- * @retval     ZERR_FALSE if failed.
+ * @brief      Start debounce process.
+ *
+ * Called from EXTI context.
+ *
+ * @param[in] id   Button ID.
+ * @param[in] tick Current system tick.
  */
-zerr_t
-btn_open(void)
+static void btn_start_debounce(
+    btn_id_t id,
+    uint32_t tick)
 {
-    zerr_t ret;
-
-    ret = btn_bsp_open();
-
-    for (uint8_t i = 0U; i < BTN_MAX; i++)
+    if (id >= BTN_MAX)
     {
-        btn_object[i].current_state = false;
-        btn_object[i].last_state = false;
-
-        btn_object[i].pressed_event = false;
-        btn_object[i].released_event = false;
-        btn_object[i].holding_event = false;
-
-        btn_object[i].debounce_tick = 0U;
-        btn_object[i].press_tick = 0U;
+        return;
     }
 
-    return ret;
+    /*
+     * Capture GPIO state immediately.
+     */
+    btn_object[id].raw_state = btn_read(id);
+
+    /*
+     * Start debounce timer.
+     */
+    btn_object[id].debounce_tick = tick;
+    btn_object[id].debounce_pending = true;
 }
 
+/* Public functions ----------------------------------------------------------*/
+
 /**
- * @brief      Enable CLK button.
- * @retval     None.
+ * @brief      Initialize button module.
+ *
+ * @retval     ZERR_OK if successful.
  */
-void
-btn_enable(void)
+zerr_t btn_open(void)
 {
-    btn_bsp_enable();
+    zerr_t ret;
+    uint32_t tick;
+
+    /*
+     * Initialize hardware.
+     */
+    ret = btn_bsp_open();
+
+    if (ret != ZERR_OK)
+    {
+        return ret;
+    }
+
+    tick = HAL_GetTick();
+
+    /*
+     * Initialize software state from actual GPIO state.
+     */
+    for (btn_id_t id = BTN_UP; id < BTN_MAX; id++)
+    {
+        bool state;
+
+        state = btn_read(id);
+
+        btn_object[id].raw_state = state;
+        btn_object[id].stable_state = state;
+
+        btn_object[id].debounce_pending = false;
+        btn_object[id].debounce_tick = tick;
+
+        /*
+         * If the button is already pressed during startup,
+         * start HOLD timing from startup.
+         */
+        if (state)
+        {
+            btn_object[id].press_tick = tick;
+        }
+        else
+        {
+            btn_object[id].press_tick = 0U;
+        }
+
+        btn_object[id].hold_reported = false;
+
+        btn_object[id].pressed_event = false;
+        btn_object[id].released_event = false;
+        btn_object[id].holding_event = false;
+    }
+
+    return ZERR_OK;
 }
 
 /**
- * @brief      Update button state.
- * @retval     None.
+ * @brief      EXTI callback.
+ *
+ * ISR responsibilities:
+ *
+ *     1. Identify button.
+ *     2. Capture GPIO state.
+ *     3. Start debounce.
+ *
+ * No delay.
+ * No application logic.
  */
-void
-btn_update(void)
+void btn_exti_callback(uint16_t GPIO_Pin)
 {
     uint32_t tick;
-    bool state;
+
+    tick = HAL_GetTick();
+
+    switch (GPIO_Pin)
+    {
+        case BTN_UP_Pin:
+        {
+            btn_start_debounce(
+                BTN_UP,
+                tick);
+
+            break;
+        }
+
+        case BTN_DOWN_Pin:
+        {
+            btn_start_debounce(
+                BTN_DOWN,
+                tick);
+
+            break;
+        }
+
+        default:
+        {
+            break;
+        }
+    }
+}
+
+/**
+ * @brief      HAL EXTI callback.
+ *
+ * This function is called by HAL when EXTI interrupt occurs.
+ */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    btn_exti_callback(GPIO_Pin);
+}
+
+/**
+ * @brief      Update button state machine.
+ *
+ * Recommended call period:
+ *
+ *     1 ~ 5 ms
+ *
+ * The button response time is approximately:
+ *
+ *     debounce time + update period
+ *
+ * With:
+ *
+ *     debounce = 10 ms
+ *     update   = 5 ms
+ *
+ * Response is approximately:
+ *
+ *     10 ~ 15 ms
+ */
+void btn_update(void)
+{
+    uint32_t tick;
 
     tick = HAL_GetTick();
 
     for (btn_id_t id = BTN_UP; id < BTN_MAX; id++)
     {
-        state = btn_read(id);
+        bool state;
 
         /*
-         * Reset one-shot events.
+         * ---------------------------------------------------------------
+         * Clear one-shot events from previous update cycle.
+         * ---------------------------------------------------------------
          */
         btn_object[id].pressed_event = false;
         btn_object[id].released_event = false;
+        btn_object[id].holding_event = false;
 
         /*
-         * Detect state change.
+         * ---------------------------------------------------------------
+         * DEBOUNCE
+         * ---------------------------------------------------------------
          */
-        if (state != btn_object[id].last_state)
+        if (btn_object[id].debounce_pending)
         {
-            btn_object[id].debounce_tick = tick;
-            btn_object[id].last_state = state;
-        }
-
-        /*
-         * Wait until debounce time has elapsed.
-         */
-        if ((tick - btn_object[id].debounce_tick) <
-            BTN_DEBOUNCE_TIME_MS)
-        {
-            continue;
-        }
-
-        /*
-         * Update stable state.
-         */
-        if (state != btn_object[id].current_state)
-        {
-            btn_object[id].current_state = state;
-
-            if (state)
+            /*
+             * Wait until debounce period expires.
+             */
+            if ((tick - btn_object[id].debounce_tick)
+                < BTN_DEBOUNCE_TIME_MS)
             {
-                /*
-                 * Button has been pressed.
-                 */
-                btn_object[id].pressed_event = true;
-                btn_object[id].holding_event = false;
-                btn_object[id].press_tick = tick;
+                continue;
             }
-            else
+
+            /*
+             * Read GPIO after debounce period.
+             */
+            state = btn_read(id);
+
+            /*
+             * GPIO changed during debounce.
+             *
+             * Restart debounce timer.
+             */
+            if (state != btn_object[id].raw_state)
             {
+                btn_object[id].raw_state = state;
+                btn_object[id].debounce_tick = tick;
+
+                continue;
+            }
+
+            /*
+             * GPIO remained stable.
+             *
+             * Debounce complete.
+             */
+            btn_object[id].debounce_pending = false;
+
+            /*
+             * Check whether stable state changed.
+             */
+            if (state != btn_object[id].stable_state)
+            {
+                btn_object[id].stable_state = state;
+
                 /*
-                 * Button has been released.
+                 * -------------------------------------------------------
+                 * PRESSED
+                 * -------------------------------------------------------
                  */
-                btn_object[id].released_event = true;
-                btn_object[id].holding_event = false;
-                btn_object[id].press_tick = 0U;
+                if (state)
+                {
+                    btn_object[id].pressed_event = true;
+
+                    btn_object[id].press_tick = tick;
+
+                    btn_object[id].hold_reported = false;
+                }
+
+                /*
+                 * -------------------------------------------------------
+                 * RELEASED
+                 * -------------------------------------------------------
+                 */
+                else
+                {
+                    btn_object[id].released_event = true;
+
+                    btn_object[id].press_tick = 0U;
+
+                    btn_object[id].hold_reported = false;
+                }
             }
         }
 
         /*
-         * Check holding state.
+         * ---------------------------------------------------------------
+         * HOLD
+         * ---------------------------------------------------------------
+         *
+         * Generate HOLD only once for each press.
          */
-        if (btn_object[id].current_state)
+        if (btn_object[id].stable_state &&
+            !btn_object[id].hold_reported)
         {
-            if ((tick - btn_object[id].press_tick) >=
-                BTN_HOLDING_TIME_MS)
+            if ((tick - btn_object[id].press_tick)
+                >= BTN_HOLDING_TIME_MS)
             {
                 btn_object[id].holding_event = true;
+
+                btn_object[id].hold_reported = true;
             }
         }
     }
 }
 
 /**
- * @brief      Check button pressed event.
- * @param[in]  id: button ID.
- * @retval     true if button was pressed.
- * @retval     false if no pressed event.
+ * @brief      Get current stable button state.
  */
-bool
-btn_pressed(btn_id_t id)
+bool btn_is_pressed(btn_id_t id)
+{
+    if (id >= BTN_MAX)
+    {
+        return false;
+    }
+
+    return btn_object[id].stable_state;
+}
+
+/**
+ * @brief      Check pressed event.
+ */
+bool btn_pressed(btn_id_t id)
 {
     if (id >= BTN_MAX)
     {
@@ -221,13 +418,9 @@ btn_pressed(btn_id_t id)
 }
 
 /**
- * @brief      Check button released event.
- * @param[in]  id: button ID.
- * @retval     true if button was released.
- * @retval     false if no released event.
+ * @brief      Check released event.
  */
-bool
-btn_released(btn_id_t id)
+bool btn_released(btn_id_t id)
 {
     if (id >= BTN_MAX)
     {
@@ -238,13 +431,9 @@ btn_released(btn_id_t id)
 }
 
 /**
- * @brief      Check button holding state.
- * @param[in]  id: button ID.
- * @retval     true if button is holding.
- * @retval     false if button is not holding.
+ * @brief      Check holding event.
  */
-bool
-btn_holding(btn_id_t id)
+bool btn_holding(btn_id_t id)
 {
     if (id >= BTN_MAX)
     {

@@ -307,6 +307,7 @@ ntc_bsp_get_raw(uint8_t channel)
     }
 
     return gh_ntc.val_temp[channel];
+
 }
 
 /**
